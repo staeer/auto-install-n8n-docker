@@ -1,33 +1,75 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'; BOLD='\033[1m'
-log()  { echo -e "${GREEN}[✔]${NC} $1"; }
-warn() { echo -e "${YELLOW}[!]${NC} $1"; }
-info() { echo -e "${CYAN}[i]${NC} $1"; }
-err()  { echo -e "${RED}[✘]${NC} $1"; exit 1; }
+APP_NAME="n8n + PostgreSQL"
+INSTALLER_VERSION="1.3.1"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_TEMPLATE="$SCRIPT_DIR/.env.example"
+COMPOSE_TEMPLATE="$SCRIPT_DIR/docker-compose.yml.example"
+BACKUP_TEMPLATE="$SCRIPT_DIR/backup-n8n.sh"
+
+DEFAULT_STACK_VERSION="$INSTALLER_VERSION"
+DEFAULT_N8N_IMAGE="n8nio/n8n:2.13.0"
+DEFAULT_POSTGRES_IMAGE="postgres:16-alpine"
+DEFAULT_POSTGRES_USER="n8n"
+DEFAULT_POSTGRES_DB="n8n"
+DEFAULT_N8N_PORT="5678"
+DEFAULT_TIMEZONE="UTC"
+DEFAULT_INSTALL_DIR="/opt/n8n"
+DEFAULT_HOST="localhost"
+
+log()  { echo "[i] $*"; }
+ok()   { echo "[✔] $*"; }
+warn() { echo "[!] $*"; }
+err()  { echo "[x] $*" >&2; exit 1; }
 
 trim() {
-  local var="${1:-}"
-  var="${var#${var%%[![:space:]]*}}"
-  var="${var%${var##*[![:space:]]}}"
-  printf '%s' "$var"
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
 }
 
-ask_default() {
-  local prompt="$1" default="$2" answer
-  read -r -p "$prompt [$default]: " answer || true
-  answer="$(trim "$answer")"
-  if [[ -z "$answer" ]]; then
-    printf '%s' "$default"
+require_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    err "Запусти так: sudo bash install.sh"
+  fi
+}
+
+check_templates() {
+  [[ -f "$COMPOSE_TEMPLATE" ]] || err "Не найден $COMPOSE_TEMPLATE"
+  [[ -f "$BACKUP_TEMPLATE" ]] || err "Не найден $BACKUP_TEMPLATE"
+}
+
+random_hex() {
+  openssl rand -hex 32
+}
+
+ask() {
+  local prompt="$1" default="${2:-}" answer
+  if [[ -n "$default" ]]; then
+    read -r -p "$prompt [$default]: " answer || true
+    answer="$(trim "$answer")"
+    if [[ -z "$answer" ]]; then
+      printf '%s' "$default"
+    else
+      printf '%s' "$answer"
+    fi
   else
+    read -r -p "$prompt: " answer || true
+    answer="$(trim "$answer")"
     printf '%s' "$answer"
   fi
 }
 
-ask_secret_default() {
-  local prompt="$1" default="$2" answer
-  read -r -s -p "$prompt [$default]: " answer || true
+ask_secret() {
+  local prompt="$1" default="${2:-}" answer
+  if [[ -n "$default" ]]; then
+    read -r -s -p "$prompt [$default]: " answer || true
+  else
+    read -r -s -p "$prompt: " answer || true
+  fi
   echo
   answer="$(trim "$answer")"
   if [[ -z "$answer" ]]; then
@@ -38,137 +80,109 @@ ask_secret_default() {
 }
 
 ask_yes_no() {
-  local prompt="$1" default="${2:-y}" answer
-  local suffix="[Y/n]"
-  [[ "$default" == "n" ]] && suffix="[y/N]"
-  read -r -p "$prompt $suffix: " answer || true
-  answer="$(trim "$answer")"
-  if [[ -z "$answer" ]]; then
-    answer="$default"
-  fi
-  [[ "$answer" =~ ^[Yy]$ ]]
-}
-
-make_webhook_url() {
-  local protocol="$1" host="$2" port="$3"
-  if [[ "$protocol" == "https" ]]; then
-    printf '%s://%s/' "$protocol" "$host"
+  local prompt="$1" default="${2:-Y}" answer
+  local shown
+  if [[ "$default" == "Y" ]]; then
+    shown="[Y/n]"
   else
-    if [[ "$port" == "80" ]]; then
-      printf '%s://%s/' "$protocol" "$host"
-    else
-      printf '%s://%s:%s/' "$protocol" "$host" "$port"
-    fi
+    shown="[y/N]"
   fi
+
+  read -r -p "$prompt $shown: " answer || true
+  answer="$(trim "$answer")"
+  answer="${answer:-$default}"
+
+  case "${answer,,}" in
+    y|yes) return 0 ;;
+    n|no)  return 1 ;;
+    *)     [[ "$default" == "Y" ]] && return 0 || return 1 ;;
+  esac
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ENV="$SCRIPT_DIR/.env"
-COMPOSE_TEMPLATE="$SCRIPT_DIR/docker-compose.yml.example"
-BACKUP_TEMPLATE="$SCRIPT_DIR/backup-n8n.sh"
-VERSION_FILE="$SCRIPT_DIR/VERSION"
-
-[[ -f "$COMPOSE_TEMPLATE" ]] || err "Не найден $COMPOSE_TEMPLATE"
-[[ -f "$BACKUP_TEMPLATE" ]] || err "Не найден $BACKUP_TEMPLATE"
-[[ $EUID -ne 0 ]] && err "Запустите: sudo bash install.sh"
-
-DEFAULT_STACK_VERSION="1.3.0"
-DEFAULT_N8N_IMAGE="n8nio/n8n:2.13.0"
-DEFAULT_POSTGRES_IMAGE="postgres:16-alpine"
-DEFAULT_POSTGRES_USER="n8n"
-DEFAULT_POSTGRES_DB="n8n"
-DEFAULT_N8N_PORT="5678"
-DEFAULT_GENERIC_TIMEZONE="UTC"
-DEFAULT_INSTALL_DIR="/opt/n8n"
-
-load_env_values() {
-  if [[ -f "$PROJECT_ENV" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$PROJECT_ENV"
-    set +a
+ensure_docker() {
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    ok "Docker уже установлен"
+    return
   fi
 
-  STACK_VERSION="$(trim "${STACK_VERSION:-$DEFAULT_STACK_VERSION}")"
-  N8N_IMAGE="$(trim "${N8N_IMAGE:-$DEFAULT_N8N_IMAGE}")"
-  POSTGRES_IMAGE="$(trim "${POSTGRES_IMAGE:-$DEFAULT_POSTGRES_IMAGE}")"
-  POSTGRES_USER="$(trim "${POSTGRES_USER:-$DEFAULT_POSTGRES_USER}")"
-  POSTGRES_PASSWORD="$(trim "${POSTGRES_PASSWORD:-}")"
-  POSTGRES_DB="$(trim "${POSTGRES_DB:-$DEFAULT_POSTGRES_DB}")"
-  N8N_PORT="$(trim "${N8N_PORT:-$DEFAULT_N8N_PORT}")"
-  N8N_ENCRYPTION_KEY="$(trim "${N8N_ENCRYPTION_KEY:-}")"
-  GENERIC_TIMEZONE="$(trim "${GENERIC_TIMEZONE:-$DEFAULT_GENERIC_TIMEZONE}")"
-  INSTALL_DIR="$(trim "${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}")"
-  N8N_HOST="$(trim "${N8N_HOST:-localhost}")"
-  N8N_PROTOCOL="$(trim "${N8N_PROTOCOL:-http}")"
-  WEBHOOK_URL="$(trim "${WEBHOOK_URL:-}")"
+  log "Обновление системы..."
+  apt-get update
+  apt-get install -y ca-certificates curl gnupg
+
+  log "Установка Docker..."
+  curl -fsSL https://get.docker.com | sh
+
+  systemctl enable --now docker
+  docker version >/dev/null
+  ok "Docker установлен"
 }
 
 write_env_file() {
-  cat > "$PROJECT_ENV" <<ENVEOF
-STACK_VERSION=${STACK_VERSION}
-N8N_IMAGE=${N8N_IMAGE}
-POSTGRES_IMAGE=${POSTGRES_IMAGE}
-POSTGRES_USER=${POSTGRES_USER}
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-POSTGRES_DB=${POSTGRES_DB}
-N8N_PORT=${N8N_PORT}
-N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
-INSTALL_DIR=${INSTALL_DIR}
-N8N_HOST=${N8N_HOST}
-N8N_PROTOCOL=${N8N_PROTOCOL}
-WEBHOOK_URL=${WEBHOOK_URL}
-ENVEOF
+  cat > "$PROJECT_ENV" <<EOF
+# Auto-generated — $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+STACK_VERSION=$STACK_VERSION
+N8N_IMAGE=$N8N_IMAGE
+POSTGRES_IMAGE=$POSTGRES_IMAGE
+POSTGRES_USER=$POSTGRES_USER
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+POSTGRES_DB=$POSTGRES_DB
+N8N_PORT=$N8N_PORT
+N8N_ENCRYPTION_KEY=$N8N_ENCRYPTION_KEY
+GENERIC_TIMEZONE=$GENERIC_TIMEZONE
+N8N_HOST=$N8N_HOST
+N8N_PROTOCOL=$N8N_PROTOCOL
+WEBHOOK_URL=$WEBHOOK_URL
+INSTALL_DIR=$INSTALL_DIR
+EOF
   chmod 600 "$PROJECT_ENV"
 }
 
-interactive_config() {
-  echo -e "${BOLD}${CYAN}"
-  echo "╔══════════════════════════════════════════════╗"
-  echo "║   n8n + PostgreSQL интерактивная установка  ║"
-  echo "╚══════════════════════════════════════════════╝"
-  echo -e "${NC}"
+validate_env_file() {
+  local bad
+  bad="$(grep -nEv '^[A-Z0-9_]+=.*$|^#|^$' "$PROJECT_ENV" || true)"
+  if [[ -n "$bad" ]]; then
+    echo "$bad"
+    err ".env поврежден"
+  fi
+}
 
-  STACK_VERSION="$DEFAULT_STACK_VERSION"
-  N8N_IMAGE="$DEFAULT_N8N_IMAGE"
-  POSTGRES_IMAGE="$DEFAULT_POSTGRES_IMAGE"
+install_files() {
+  log "Создание директорий..."
+  mkdir -p "$INSTALL_DIR"/{postgres_data,n8n_data,backups}
 
-  echo "1) Внешний доступ:"
-  echo "   1 - домен + reverse proxy + HTTPS"
-  echo "   2 - прямой доступ по IP:порт"
-  ACCESS_MODE="$(ask_default 'Выберите режим' '1')"
+  log "Копирование конфигурации..."
+  cp "$COMPOSE_TEMPLATE" "$INSTALL_DIR/docker-compose.yml"
+  cp "$BACKUP_TEMPLATE" "$INSTALL_DIR/backup-n8n.sh"
+  cp "$PROJECT_ENV" "$INSTALL_DIR/.env"
 
-  POSTGRES_USER="$(ask_default 'PostgreSQL user' "${POSTGRES_USER:-$DEFAULT_POSTGRES_USER}")"
-  POSTGRES_DB="$(ask_default 'PostgreSQL database' "${POSTGRES_DB:-$DEFAULT_POSTGRES_DB}")"
+  chmod 600 "$INSTALL_DIR/.env"
+  chmod +x "$INSTALL_DIR/backup-n8n.sh"
+}
 
-  local generated_pg generated_key
-  generated_pg="$(openssl rand -base64 16 | tr -d '\n')"
-  generated_key="$(openssl rand -base64 32 | tr -d '\n')"
+install_cron() {
+  local cron_line="0 3 * * * $INSTALL_DIR/backup-n8n.sh >> $INSTALL_DIR/backups/backup.log 2>&1"
+  local current_cron
+  current_cron="$(crontab -l 2>/dev/null || true)"
 
-  POSTGRES_PASSWORD="$(ask_secret_default 'PostgreSQL password' "${POSTGRES_PASSWORD:-$generated_pg}")"
-  N8N_ENCRYPTION_KEY="$(ask_secret_default 'N8N encryption key' "${N8N_ENCRYPTION_KEY:-$generated_key}")"
+  if grep -Fq "$INSTALL_DIR/backup-n8n.sh" <<<"$current_cron"; then
+    ok "Cron backup уже настроен"
+    return
+  fi
 
-  N8N_PORT="$(ask_default 'Порт n8n на сервере' "${N8N_PORT:-$DEFAULT_N8N_PORT}")"
-  GENERIC_TIMEZONE="$(ask_default 'Timezone' "${GENERIC_TIMEZONE:-$DEFAULT_GENERIC_TIMEZONE}")"
-  INSTALL_DIR="$(ask_default 'Папка установки' "${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}")"
+  printf '%s\n%s\n' "$current_cron" "$cron_line" | crontab -
+  ok "Cron backup добавлен"
+}
 
-  case "$ACCESS_MODE" in
-    1)
-      N8N_HOST="$(ask_default 'Домен n8n' "${N8N_HOST:-n8n.example.com}")"
-      N8N_PROTOCOL="https"
-      WEBHOOK_URL="https://${N8N_HOST}/"
-      ;;
-    2)
-      N8N_HOST="$(ask_default 'IP или hostname сервера' "${N8N_HOST:-127.0.0.1}")"
-      N8N_PROTOCOL="http"
-      WEBHOOK_URL="$(make_webhook_url "$N8N_PROTOCOL" "$N8N_HOST" "$N8N_PORT")"
-      ;;
-    *) err "Неверный режим. Нужен 1 или 2" ;;
-  esac
+start_stack() {
+  log "Запуск контейнеров..."
+  cd "$INSTALL_DIR"
+  docker compose pull
+  docker compose up -d
+}
 
+show_summary() {
   echo
-  info "Итоговые параметры:"
+  log "Итоговые параметры:"
   echo "  n8n image:        $N8N_IMAGE"
   echo "  postgres image:   $POSTGRES_IMAGE"
   echo "  install dir:      $INSTALL_DIR"
@@ -178,137 +192,95 @@ interactive_config() {
   echo "  webhook url:      $WEBHOOK_URL"
   echo "  timezone:         $GENERIC_TIMEZONE"
   echo
-
-  ask_yes_no 'Сохранить эти настройки в .env и продолжить?' y || err 'Установка отменена.'
-  write_env_file
-  log ".env сохранён: $PROJECT_ENV"
 }
 
-load_env_values
+show_final() {
+  echo
+  ok "Установка завершена"
+  echo "  n8n:        $WEBHOOK_URL"
+  echo "  install dir: $INSTALL_DIR"
+  echo
+  echo "Проверка:"
+  echo "  cd $INSTALL_DIR && sudo docker compose ps"
+  echo "  sudo docker logs -f n8n"
+  echo
+}
 
-if [[ -f "$PROJECT_ENV" ]]; then
-  info "Найден .env"
-  if ask_yes_no 'Использовать существующий .env без вопросов?' y; then
-    [[ -z "$POSTGRES_PASSWORD" ]] && POSTGRES_PASSWORD="$(openssl rand -base64 16 | tr -d '\n')"
-    [[ -z "$N8N_ENCRYPTION_KEY" ]] && N8N_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr -d '\n')"
-    [[ -z "$WEBHOOK_URL" ]] && WEBHOOK_URL="$(make_webhook_url "$N8N_PROTOCOL" "$N8N_HOST" "$N8N_PORT")"
-    write_env_file
+main() {
+  require_root
+  check_templates
+
+  clear || true
+  cat <<'EOF'
+╔══════════════════════════════════════════════╗
+║   n8n + PostgreSQL интерактивная установка  ║
+╚══════════════════════════════════════════════╝
+EOF
+  echo
+  echo "1) Внешний доступ:"
+  echo "   1 - домен + reverse proxy + HTTPS"
+  echo "   2 - прямой доступ по IP:порт"
+
+  ACCESS_MODE="$(ask "Выберите режим" "1")"
+  case "$ACCESS_MODE" in
+    1)
+      N8N_PROTOCOL="https"
+      ;;
+    2)
+      N8N_PROTOCOL="http"
+      ;;
+    *)
+      err "Неверный режим. Выбери 1 или 2."
+      ;;
+  esac
+
+  STACK_VERSION="$DEFAULT_STACK_VERSION"
+  N8N_IMAGE="$DEFAULT_N8N_IMAGE"
+  POSTGRES_IMAGE="$DEFAULT_POSTGRES_IMAGE"
+
+  POSTGRES_USER="$(ask "PostgreSQL user" "$DEFAULT_POSTGRES_USER")"
+  POSTGRES_DB="$(ask "PostgreSQL database" "$DEFAULT_POSTGRES_DB")"
+  POSTGRES_PASSWORD="$(ask_secret "PostgreSQL password" "$(random_hex)")"
+  N8N_ENCRYPTION_KEY="$(ask_secret "N8N encryption key" "$(random_hex)")"
+  N8N_PORT="$(ask "Порт n8n на сервере" "$DEFAULT_N8N_PORT")"
+  GENERIC_TIMEZONE="$(ask "Timezone" "$DEFAULT_TIMEZONE")"
+  INSTALL_DIR="$(ask "Папка установки" "$DEFAULT_INSTALL_DIR")"
+
+  if [[ "$ACCESS_MODE" == "1" ]]; then
+    N8N_HOST="$(ask "Домен n8n" "n8n.example.com")"
+    WEBHOOK_URL="https://$N8N_HOST/"
   else
-    interactive_config
+    N8N_HOST="$(ask "IP или hostname сервера" "$DEFAULT_HOST")"
+    WEBHOOK_URL="http://$N8N_HOST:$N8N_PORT/"
   fi
-else
-  interactive_config
-fi
 
-case "$N8N_PROTOCOL" in
-  http|https) ;;
-  *) err "N8N_PROTOCOL должен быть http или https" ;;
-esac
-[[ "$WEBHOOK_URL" != */ ]] && WEBHOOK_URL="${WEBHOOK_URL}/"
+  PROJECT_ENV="$SCRIPT_DIR/.env"
 
-info "Подтверждение перед установкой:"
-echo "  Версия инсталлятора: $STACK_VERSION"
-echo "  n8n image:           $N8N_IMAGE"
-echo "  PostgreSQL image:    $POSTGRES_IMAGE"
-echo "  Директория:          $INSTALL_DIR"
-echo "  Внешний адрес:       $WEBHOOK_URL"
-echo "  Timezone:            $GENERIC_TIMEZONE"
-echo
-ask_yes_no 'Начать установку?' y || err 'Установка отменена.'
+  show_summary
+  ask_yes_no "Сохранить эти настройки в .env и продолжить?" "Y" || err "Отменено"
 
-info "Обновление системы..."
-apt-get update -qq
-apt-get install -y -qq curl wget gnupg2 ca-certificates lsb-release apt-transport-https software-properties-common openssl
+  write_env_file
+  validate_env_file
+  ok ".env сохранён: $PROJECT_ENV"
 
-if command -v docker &>/dev/null; then
-  warn "Docker уже установлен ($(docker --version | cut -d' ' -f3 | tr -d ','))"
-else
-  info "Установка Docker..."
-  curl -fsSL https://get.docker.com | sh
-  systemctl enable docker
-  systemctl start docker
-  log "Docker установлен"
-fi
+  echo
+  log "Подтверждение перед установкой:"
+  echo "  Версия инсталлятора: $INSTALLER_VERSION"
+  echo "  n8n image:           $N8N_IMAGE"
+  echo "  PostgreSQL image:    $POSTGRES_IMAGE"
+  echo "  Директория:          $INSTALL_DIR"
+  echo "  Внешний адрес:       $WEBHOOK_URL"
+  echo "  Timezone:            $GENERIC_TIMEZONE"
+  echo
 
-if docker compose version &>/dev/null 2>&1; then
-  COMPOSE_CMD="docker compose"
-elif command -v docker-compose &>/dev/null; then
-  COMPOSE_CMD="docker-compose"
-else
-  info "Установка Docker Compose plugin..."
-  apt-get install -y -qq docker-compose-plugin 2>/dev/null || err "Не удалось установить docker compose plugin"
-  COMPOSE_CMD="docker compose"
-  log "Docker Compose установлен"
-fi
+  ask_yes_no "Начать установку?" "Y" || err "Отменено"
 
-info "Создание директорий..."
-mkdir -p "$INSTALL_DIR"/{n8n_data,postgres_data,backups}
-chmod 700 "$INSTALL_DIR/postgres_data"
+  ensure_docker
+  install_files
+  validate_env_file
+  install_cron
+  start_stack
+  show_final
+}
 
-info "Копирование конфигурации..."
-cat > "$INSTALL_DIR/.env" <<ENVEOF
-# Auto-generated — $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-STACK_VERSION=${STACK_VERSION}
-N8N_IMAGE=${N8N_IMAGE}
-POSTGRES_IMAGE=${POSTGRES_IMAGE}
-POSTGRES_USER=${POSTGRES_USER}
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-POSTGRES_DB=${POSTGRES_DB}
-N8N_PORT=${N8N_PORT}
-N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
-N8N_HOST=${N8N_HOST}
-N8N_PROTOCOL=${N8N_PROTOCOL}
-WEBHOOK_URL=${WEBHOOK_URL}
-INSTALL_DIR=${INSTALL_DIR}
-ENVEOF
-chmod 600 "$INSTALL_DIR/.env"
-install -m 644 "$COMPOSE_TEMPLATE" "$INSTALL_DIR/docker-compose.yml"
-install -m 755 "$BACKUP_TEMPLATE" "$INSTALL_DIR/backup.sh"
-
-cat > "$INSTALL_DIR/VERSION" <<VEOF
-STACK_VERSION=${STACK_VERSION}
-N8N_IMAGE=${N8N_IMAGE}
-POSTGRES_IMAGE=${POSTGRES_IMAGE}
-VEOF
-[[ -f "$VERSION_FILE" ]] && install -m 644 "$VERSION_FILE" "$INSTALL_DIR/PROJECT_VERSION"
-
-info "Запуск контейнеров..."
-cd "$INSTALL_DIR"
-$COMPOSE_CMD up -d
-
-info "Ожидание готовности n8n (до 120 сек)..."
-for i in $(seq 1 60); do
-  if curl -fsS "http://localhost:${N8N_PORT}/healthz" 2>/dev/null | grep -q 'ok'; then
-    log "n8n отвечает по /healthz"
-    break
-  fi
-  sleep 2
-  if [[ "$i" -eq 60 ]]; then
-    warn "n8n не ответил по /healthz за 120 сек. Логи: cd $INSTALL_DIR && $COMPOSE_CMD logs -f"
-  fi
-done
-
-(crontab -l 2>/dev/null | grep -v "$INSTALL_DIR/backup.sh"; echo "0 2 * * * $INSTALL_DIR/backup.sh >> $INSTALL_DIR/backups/backup.log 2>&1") | crontab -
-log "Ежедневный бэкап настроен (02:00)"
-
-if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
-  info "Открытие порта $N8N_PORT в UFW..."
-  ufw allow "$N8N_PORT/tcp" comment "n8n" >/dev/null
-fi
-
-echo
-echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║         Установка завершена успешно!         ║${NC}"
-echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════╝${NC}"
-echo
-echo -e "  ${BOLD}Внешний URL:${NC}    $WEBHOOK_URL"
-echo -e "  ${BOLD}Локальный URL:${NC}  http://localhost:${N8N_PORT}"
-echo -e "  ${BOLD}Директория:${NC}     $INSTALL_DIR"
-echo -e "  ${BOLD}Версии:${NC}         $(tr '\n' ' ' < "$INSTALL_DIR/VERSION")"
-echo
-echo -e "  ${BOLD}PostgreSQL:${NC}"
-echo -e "    DB:       $POSTGRES_DB"
-echo -e "    User:     $POSTGRES_USER"
-echo -e "    Password: $POSTGRES_PASSWORD"
-warn "Сохраните пароль. Он записан в $INSTALL_DIR/.env и $PROJECT_ENV"
+main "$@"
