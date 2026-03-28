@@ -35,3 +35,20 @@ sudo bash install.sh
 Если `.env` уже есть, скрипт спросит:
 - использовать существующий `.env`
 - или пройти мастер вопросов заново
+
+
+## Как запускать uninstall.sh
+
+```bash
+git clone https://github.com/staeer/auto-install-n8n-docker.git
+cd auto-install-n8n-docker
+sudo bash uninstall.sh
+``
+или для другого пути:
+
+```bash
+git clone https://github.com/staeer/auto-install-n8n-docker.git
+cd auto-install-n8n-docker
+sudo bash uninstall.sh /opt/n8n
+``
+
