@@ -86,7 +86,7 @@ VERSION_FILE="$SCRIPT_DIR/VERSION"
 [[ -f "$BACKUP_TEMPLATE" ]] || err "Не найден $BACKUP_TEMPLATE"
 [[ $EUID -ne 0 ]] && err "Запустите: sudo bash install.sh"
 
-DEFAULT_STACK_VERSION="1.3.1"
+DEFAULT_STACK_VERSION="1.3.2"
 DEFAULT_N8N_IMAGE="n8nio/n8n:2.13.0"
 DEFAULT_POSTGRES_IMAGE="postgres:16-alpine"
 DEFAULT_POSTGRES_USER="n8n"
@@ -262,7 +262,10 @@ fi
 
 info "Создание директорий..."
 mkdir -p "$INSTALL_DIR"/{n8n_data,postgres_data,backups}
+chown -R 999:999 "$INSTALL_DIR/postgres_data"
+chown -R 1000:1000 "$INSTALL_DIR/n8n_data"
 chmod 700 "$INSTALL_DIR/postgres_data"
+chmod 755 "$INSTALL_DIR/n8n_data"
 
 info "Копирование конфигурации..."
 cat > "$INSTALL_DIR/.env" <<ENVEOF
@@ -300,13 +303,13 @@ $COMPOSE_CMD up -d
 
 info "Ожидание готовности n8n (до 120 сек)..."
 for i in $(seq 1 60); do
-  if curl -fsS "http://localhost:${N8N_PORT}/healthz" 2>/dev/null | grep -q 'ok'; then
-    log "n8n отвечает по /healthz"
+  if curl -fsS "http://127.0.0.1:${N8N_PORT}" >/dev/null 2>&1; then
+    log "n8n доступен: $WEBHOOK_URL"
     break
   fi
   sleep 2
   if [[ "$i" -eq 60 ]]; then
-    warn "n8n не ответил по /healthz за 120 сек. Логи: cd $INSTALL_DIR && $COMPOSE_CMD logs -f"
+    warn "n8n не ответил за 120 сек. Логи: cd $INSTALL_DIR && $COMPOSE_CMD logs -f"
   fi
 done
 

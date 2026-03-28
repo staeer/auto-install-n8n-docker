@@ -1,4 +1,3 @@
-version: "3.8"
 
 services:
   postgres:
@@ -41,6 +40,7 @@ services:
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: 336
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      TZ: ${GENERIC_TIMEZONE}
     volumes:
       - ${INSTALL_DIR}/n8n_data:/home/node/.n8n
     depends_on:

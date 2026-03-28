@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.2
+- Fixed ownership and permissions for `n8n_data` and `postgres_data` during install.
+- Removed obsolete `version:` from `docker-compose.yml.example`.
+- Replaced fragile `/healthz` readiness check with a direct HTTP check on the n8n port.
+- Added `TZ` to n8n container environment.
+
 ## 1.3.1
 - Fixed broken `.env` writing for secret values entered during interactive install.
 - Switched generated secrets from base64 to hex to avoid unsafe characters in `.env`.
