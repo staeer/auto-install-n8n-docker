@@ -1,10 +1,7 @@
 # Changelog
 
-## 1.2.0
-- Git-friendly project structure
-- `docker-compose.yml` moved to standalone template file
-- `backup-n8n.sh` moved to standalone script file
-- `install.sh` now copies project files instead of generating compose inline
-- Fixed image versioning kept in `.env.example`
-- Default timezone remains `UTC`
-- `WEBHOOK_URL` logic kept corrected for reverse proxy and direct access
+## 1.3.1
+- Fixed broken `.env` writing for secret values entered during interactive install.
+- Switched generated secrets from base64 to hex to avoid unsafe characters in `.env`.
+- Added `.env` validation before sourcing and before `docker compose up -d`.
+- Added `TZ` to generated env files.
