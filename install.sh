@@ -95,6 +95,7 @@ DEFAULT_N8N_PORT="5678"
 DEFAULT_GENERIC_TIMEZONE="UTC"
 DEFAULT_INSTALL_DIR="/opt/n8n"
 DEFAULT_N8N_HOST="localhost"
+DEFAULT_N8N_SECURE_COOKIE="true"
 
 load_env_values() {
   if [[ -f "$PROJECT_ENV" ]]; then
@@ -118,6 +119,7 @@ load_env_values() {
   N8N_HOST="$(trim "${N8N_HOST:-$DEFAULT_N8N_HOST}")"
   N8N_PROTOCOL="$(trim "${N8N_PROTOCOL:-http}")"
   WEBHOOK_URL="$(trim "${WEBHOOK_URL:-}")"
+  N8N_SECURE_COOKIE="$(trim "${N8N_SECURE_COOKIE:-$DEFAULT_N8N_SECURE_COOKIE}")"
 }
 
 write_env_file() {
@@ -137,6 +139,7 @@ INSTALL_DIR=${INSTALL_DIR}
 N8N_HOST=${N8N_HOST}
 N8N_PROTOCOL=${N8N_PROTOCOL}
 WEBHOOK_URL=${WEBHOOK_URL}
+N8N_SECURE_COOKIE=${N8N_SECURE_COOKIE}
 ENVEOF
   chmod 600 "$PROJECT_ENV"
   validate_env_file "$PROJECT_ENV"
@@ -177,11 +180,13 @@ interactive_config() {
       N8N_HOST="$(ask_default 'Домен n8n' "${N8N_HOST:-n8n.example.com}")"
       N8N_PROTOCOL="https"
       WEBHOOK_URL="https://${N8N_HOST}/"
+      N8N_SECURE_COOKIE="true"
       ;;
     2)
       N8N_HOST="$(ask_default 'IP или hostname сервера' "${N8N_HOST:-127.0.0.1}")"
       N8N_PROTOCOL="http"
       WEBHOOK_URL="$(make_webhook_url "$N8N_PROTOCOL" "$N8N_HOST" "$N8N_PORT")"
+      N8N_SECURE_COOKIE="$(ask_default 'N8N_SECURE_COOKIE (true/false)' "${N8N_SECURE_COOKIE:-$DEFAULT_N8N_SECURE_COOKIE}")"
       ;;
     *) err "Неверный режим. Нужен 1 или 2" ;;
   esac
@@ -196,6 +201,7 @@ interactive_config() {
   echo "  protocol:         $N8N_PROTOCOL"
   echo "  webhook url:      $WEBHOOK_URL"
   echo "  timezone:         $GENERIC_TIMEZONE"
+  echo "  secure cookie:    $N8N_SECURE_COOKIE"
   echo
 
   ask_yes_no 'Сохранить эти настройки в .env и продолжить?' y || err 'Установка отменена.'
@@ -224,6 +230,10 @@ case "$N8N_PROTOCOL" in
   *) err "N8N_PROTOCOL должен быть http или https" ;;
 esac
 [[ "$WEBHOOK_URL" != */ ]] && WEBHOOK_URL="${WEBHOOK_URL}/"
+case "${N8N_SECURE_COOKIE,,}" in
+  true|false) N8N_SECURE_COOKIE="${N8N_SECURE_COOKIE,,}" ;;
+  *) err "N8N_SECURE_COOKIE должен быть true или false" ;;
+esac
 
 info "Подтверждение перед установкой:"
 echo "  Версия инсталлятора: $STACK_VERSION"
@@ -232,6 +242,7 @@ echo "  PostgreSQL image:    $POSTGRES_IMAGE"
 echo "  Директория:          $INSTALL_DIR"
 echo "  Внешний адрес:       $WEBHOOK_URL"
 echo "  Timezone:            $GENERIC_TIMEZONE"
+echo "  Secure cookie:       $N8N_SECURE_COOKIE"
 echo
 ask_yes_no 'Начать установку?' y || err 'Установка отменена.'
 
@@ -283,6 +294,7 @@ TZ=${GENERIC_TIMEZONE}
 N8N_HOST=${N8N_HOST}
 N8N_PROTOCOL=${N8N_PROTOCOL}
 WEBHOOK_URL=${WEBHOOK_URL}
+N8N_SECURE_COOKIE=${N8N_SECURE_COOKIE}
 INSTALL_DIR=${INSTALL_DIR}
 ENVEOF
 chmod 600 "$INSTALL_DIR/.env"
