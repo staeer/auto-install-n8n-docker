@@ -1,10 +1,10 @@
 # Changelog
 
-## 1.1.0
-- n8n image pinned to `n8nio/n8n:2.13.0`
-- PostgreSQL image moved to configurable variable `POSTGRES_IMAGE`
-- default timezone set to `UTC`
-- fixed `WEBHOOK_URL` logic for direct access and reverse proxy
-- added `STACK_VERSION`, `N8N_IMAGE`, `POSTGRES_IMAGE`, `VERSION`
-- cleaned `.env.example` comments and empty values handling
-- `uninstall.sh` now removes pinned images from installed `.env`
+## 1.2.0
+- Git-friendly project structure
+- `docker-compose.yml` moved to standalone template file
+- `backup-n8n.sh` moved to standalone script file
+- `install.sh` now copies project files instead of generating compose inline
+- Fixed image versioning kept in `.env.example`
+- Default timezone remains `UTC`
+- `WEBHOOK_URL` logic kept corrected for reverse proxy and direct access

@@ -1,8 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # =============================================================
 #  Auto-install: Docker + n8n + PostgreSQL
+#  Git-friendly installer
 #  Tested on: Ubuntu 20.04 / 22.04 / 24.04, Debian 11/12
-#  Installer version: 1.1.0
+#  Installer version: 1.2.0
 # =============================================================
 
 set -euo pipefail
@@ -37,26 +38,35 @@ make_webhook_url() {
   fi
 }
 
-echo -e "${BOLD}${CYAN}"
-echo "╔══════════════════════════════════════════╗"
-echo "║     Docker + n8n + PostgreSQL Setup      ║"
-echo "╚══════════════════════════════════════════╝"
-echo -e "${NC}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ENV="$SCRIPT_DIR/.env"
+COMPOSE_TEMPLATE="$SCRIPT_DIR/docker-compose.yml.example"
+BACKUP_TEMPLATE="$SCRIPT_DIR/backup-n8n.sh"
+VERSION_FILE="$SCRIPT_DIR/VERSION"
 
+[[ -f "$COMPOSE_TEMPLATE" ]] || err "Не найден $COMPOSE_TEMPLATE"
+[[ -f "$BACKUP_TEMPLATE" ]] || err "Не найден $BACKUP_TEMPLATE"
 [[ $EUID -ne 0 ]] && err "Запустите скрипт от root: sudo bash install.sh"
 
-CONFIG_FILE="$(dirname "$0")/.env"
-if [[ -f "$CONFIG_FILE" ]]; then
-  info "Загружаю конфигурацию из .env"
-  set -a
-  # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
-  set +a
+if [[ ! -f "$PROJECT_ENV" ]]; then
+  if [[ -f "$SCRIPT_DIR/.env.example" ]]; then
+    cp "$SCRIPT_DIR/.env.example" "$PROJECT_ENV"
+    warn ".env не найден. Создан из .env.example: $PROJECT_ENV"
+    warn "Заполните .env и запустите install.sh ещё раз"
+    exit 1
+  else
+    err "Не найден .env и .env.example"
+  fi
 fi
 
-STACK_VERSION="${STACK_VERSION:-1.1.0}"
-N8N_IMAGE="${N8N_IMAGE:-n8nio/n8n:2.13.0}"
-POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16-alpine}"
+set -a
+# shellcheck disable=SC1091
+source "$PROJECT_ENV"
+set +a
+
+STACK_VERSION="$(trim "${STACK_VERSION:-1.2.0}")"
+N8N_IMAGE="$(trim "${N8N_IMAGE:-n8nio/n8n:2.13.0}")"
+POSTGRES_IMAGE="$(trim "${POSTGRES_IMAGE:-postgres:16-alpine}")"
 POSTGRES_USER="$(trim "${POSTGRES_USER:-n8n}")"
 POSTGRES_PASSWORD="$(trim "${POSTGRES_PASSWORD:-}")"
 POSTGRES_DB="$(trim "${POSTGRES_DB:-n8n}")"
@@ -79,6 +89,13 @@ esac
 
 [[ "$WEBHOOK_URL" != */ ]] && WEBHOOK_URL="${WEBHOOK_URL}/"
 
+
+echo -e "${BOLD}${CYAN}"
+echo "╔══════════════════════════════════════════╗"
+echo "║     Docker + n8n + PostgreSQL Setup      ║"
+echo "╚══════════════════════════════════════════╝"
+echo -e "${NC}"
+
 echo ""
 info "Параметры установки:"
 echo "  Версия инсталлятора: $STACK_VERSION"
@@ -95,8 +112,7 @@ echo ""
 
 info "Обновление системы..."
 apt-get update -qq
-apt-get install -y -qq curl wget gnupg2 ca-certificates lsb-release \
-  apt-transport-https software-properties-common openssl
+apt-get install -y -qq curl wget gnupg2 ca-certificates lsb-release apt-transport-https software-properties-common openssl
 
 if command -v docker &>/dev/null; then
   warn "Docker уже установлен ($(docker --version | cut -d' ' -f3 | tr -d ','))"
@@ -108,30 +124,22 @@ else
   log "Docker установлен"
 fi
 
-if command -v docker compose &>/dev/null 2>&1; then
-  warn "Docker Compose plugin уже установлен"
-elif command -v docker-compose &>/dev/null; then
-  warn "docker-compose уже установлен"
-else
-  info "Установка Docker Compose plugin..."
-  apt-get install -y -qq docker-compose-plugin 2>/dev/null || \
-  curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
-    -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose
-  log "Docker Compose установлен"
-fi
-
 if docker compose version &>/dev/null 2>&1; then
   COMPOSE_CMD="docker compose"
-else
+elif command -v docker-compose &>/dev/null; then
   COMPOSE_CMD="docker-compose"
+else
+  info "Установка Docker Compose plugin..."
+  apt-get install -y -qq docker-compose-plugin 2>/dev/null || err "Не удалось установить docker compose plugin"
+  COMPOSE_CMD="docker compose"
+  log "Docker Compose установлен"
 fi
 
 info "Создание директорий..."
 mkdir -p "$INSTALL_DIR"/{n8n_data,postgres_data,backups}
 chmod 700 "$INSTALL_DIR/postgres_data"
-cd "$INSTALL_DIR"
 
-info "Запись конфигурации..."
+info "Подготовка .env для установки..."
 cat > "$INSTALL_DIR/.env" <<ENVEOF
 # Auto-generated — $(date -u +'%Y-%m-%d %H:%M:%S UTC')
 STACK_VERSION=${STACK_VERSION}
@@ -149,65 +157,15 @@ WEBHOOK_URL=${WEBHOOK_URL}
 INSTALL_DIR=${INSTALL_DIR}
 ENVEOF
 chmod 600 "$INSTALL_DIR/.env"
-log ".env сохранён"
+log "$INSTALL_DIR/.env сохранён"
 
-info "Создание docker-compose.yml..."
-cat > "$INSTALL_DIR/docker-compose.yml" <<'COMPOSE'
-version: "3.8"
+info "Копирование docker-compose.yml..."
+install -m 644 "$COMPOSE_TEMPLATE" "$INSTALL_DIR/docker-compose.yml"
+log "docker-compose.yml скопирован"
 
-services:
-  postgres:
-    image: ${POSTGRES_IMAGE}
-    container_name: n8n_postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    volumes:
-      - ${INSTALL_DIR}/postgres_data:/var/lib/postgresql/data
-      - ${INSTALL_DIR}/backups:/backups
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - n8n_net
-
-  n8n:
-    image: ${N8N_IMAGE}
-    container_name: n8n_app
-    restart: unless-stopped
-    ports:
-      - "${N8N_PORT}:5678"
-    environment:
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
-      DB_POSTGRESDB_USER: ${POSTGRES_USER}
-      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-      N8N_HOST: ${N8N_HOST}
-      N8N_PORT: 5678
-      N8N_PROTOCOL: ${N8N_PROTOCOL}
-      WEBHOOK_URL: ${WEBHOOK_URL}
-      EXECUTIONS_DATA_PRUNE: "true"
-      EXECUTIONS_DATA_MAX_AGE: 336
-      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
-    volumes:
-      - ${INSTALL_DIR}/n8n_data:/home/node/.n8n
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - n8n_net
-
-networks:
-  n8n_net:
-    driver: bridge
-COMPOSE
+info "Копирование backup-скрипта..."
+install -m 755 "$BACKUP_TEMPLATE" "$INSTALL_DIR/backup.sh"
+log "backup.sh скопирован"
 
 cat > "$INSTALL_DIR/VERSION" <<VEOF
 STACK_VERSION=${STACK_VERSION}
@@ -215,7 +173,9 @@ N8N_IMAGE=${N8N_IMAGE}
 POSTGRES_IMAGE=${POSTGRES_IMAGE}
 VEOF
 
-log "docker-compose.yml создан"
+if [[ -f "$VERSION_FILE" ]]; then
+  install -m 644 "$VERSION_FILE" "$INSTALL_DIR/PROJECT_VERSION"
+fi
 
 info "Запуск контейнеров..."
 cd "$INSTALL_DIR"
@@ -233,20 +193,7 @@ for i in $(seq 1 60); do
   fi
 done
 
-info "Установка скрипта резервного копирования..."
-cat > "$INSTALL_DIR/backup.sh" <<BACKUP
-#!/bin/bash
-BACKUP_DIR="${INSTALL_DIR}/backups"
-DATE=\$(date +%Y%m%d_%H%M%S)
-FILE="\$BACKUP_DIR/n8n_pg_\$DATE.sql.gz"
-
-docker exec n8n_postgres pg_dump -U ${POSTGRES_USER} ${POSTGRES_DB} | gzip > "\$FILE"
-ls -t "\$BACKUP_DIR"/*.sql.gz 2>/dev/null | tail -n +8 | xargs -r rm
-echo "Backup saved: \$FILE"
-BACKUP
-chmod +x "$INSTALL_DIR/backup.sh"
-
-(crontab -l 2>/dev/null; echo "0 2 * * * $INSTALL_DIR/backup.sh >> $INSTALL_DIR/backups/backup.log 2>&1") | crontab -
+(crontab -l 2>/dev/null | grep -v "$INSTALL_DIR/backup.sh"; echo "0 2 * * * $INSTALL_DIR/backup.sh >> $INSTALL_DIR/backups/backup.log 2>&1") | crontab -
 log "Ежедневный бэкап настроен (02:00)"
 
 if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
