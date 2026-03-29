@@ -1,5 +1,6 @@
 # auto-install-n8n-docker
 
+
 Интерактивный установщик `Docker + PostgreSQL + n8n` для Ubuntu.
 
 README ниже приведён по фактическому поведению файлов репозитория: `install.sh`, `docker-compose.yml.example`, `backup-n8n.sh`, `.env.example`, `uninstall.sh`.

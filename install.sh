@@ -86,7 +86,7 @@ VERSION_FILE="$SCRIPT_DIR/VERSION"
 [[ -f "$BACKUP_TEMPLATE" ]] || err "Не найден $BACKUP_TEMPLATE"
 [[ $EUID -ne 0 ]] && err "Запустите: sudo bash install.sh"
 
-DEFAULT_STACK_VERSION="1.3.2"
+DEFAULT_STACK_VERSION="1.3.5"
 DEFAULT_N8N_IMAGE="n8nio/n8n:2.13.0"
 DEFAULT_POSTGRES_IMAGE="postgres:16-alpine"
 DEFAULT_POSTGRES_USER="n8n"
