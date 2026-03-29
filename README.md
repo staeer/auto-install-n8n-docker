@@ -1,4 +1,4 @@
-# auto-install-n8n-docker
+# auto-install-n8n-docker для Ubuntu
 
 
 Интерактивный установщик `Docker + PostgreSQL + n8n` для Ubuntu.
